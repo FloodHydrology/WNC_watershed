@@ -5,7 +5,6 @@
 # Purpose: Create function to delineate watershed based on area thresholds
 ####################################################################################
 
-
 ####################################################################################
 # Step 1: Setup Worskspace ---------------------------------------------------------
 ####################################################################################
@@ -23,7 +22,7 @@ scratch_dir<- "C:\\ScratchWorkspace/"
 data_dir<-    "//storage.research.sesync.org/njones-data/Research Projects/WNC_watershed/spatial_data/RawData/"
 output_dir<-   "//storage.research.sesync.org/njones-data/Research Projects/WNC_watershed/spatial_data/DerivedData/"
 
-#Download data
+#Download data (these are from 1_basic_watershed_delineation.R)
 dem<-raster(paste0(data_dir,"WS2_DEM1.tif"))
 watershed<-raster(paste0(output_dir, "watershed.tif"))
 
@@ -87,35 +86,74 @@ fdr<-raster(paste0(scratch_dir,"fdr.tif"))
 ####################################################################################
 # Step 3: Creat delineation function------------------------------------------------
 ####################################################################################
+#Create function to 
 threshold_fun<-function(fac,         #flow accumulation raster
                         fdr,         #flow direction raster
                         threshold,   #threshold for watersheds [in map units]
-                        scratch_dir,
-                        output_dir){ #where to store the output shapes!
+                        scratch_dir, #scratch workspace
+                        output_dir,  #where to store the output rasters!
+                        output_name){
   
-  #Write fdr to output directory
-  writeRaster(fdr,
-              paste0(scratch_dir, "fdr2.tif"),
-              overwrite=T)
-  
-  #For testing
-  threshold<-cellStats(watershed, sum)*0.05*3.25^2
-  
-  #Define pour points with threshold flow accumulation value
   #Estimate number of cells for threshold
   threshold<-threshold/res(fac)[1]/res(fac)[2]
-  fac[fac==threshold]
   
+  #use threshold to define the flow_net
+  flowgrid<-fac
+  flowgrid[flowgrid<threshold]<-NA
+  flowgrid@crs<-dem@crs
   
-  #threshold appraoch isn't going to work. new approach
-  #Define fac value ==0 as points
-  #Trace flow paths
-  #find values along each flow path that are just pass threshold
-  #delineate watershed
-  #Clip points from that watershed [so we don't double deleniate]
-  #there may have to be some control [like the watershed has to be within 5% of the threshold on either side]
+  #Create function to find local min
+  min_fun<-function(x, ...){
+    #define center cell value
+    center<-x[ceiling(length(x)/2)]
+    
+    #define min value in window
+    min<-min(x, na.rm=T)
+    
+    #If the center cell is the local minumum, return "1"
+    output<-ifelse(min==center, 1,0)
+    
+    #define output cell value
+    output
+  }
   
+  #use function to find local minima in raster with 3x3 moving window
+  outlet_grd<-focal(x=flowgrid, w=matrix(1,3,3), fun=min_fun, na.rm=T)
+
+  #convert outlet_grd to points
+  outlet<-data.frame(rasterToPoints(outlet_grd)) %>%
+    filter(layer==1)
+  outlet<-st_as_sf(outlet, coords=c("x","y"), crs=paste(fac@crs))
+
+  #Write fdr and points to scratch dir
+  writeRaster(fdr,
+              paste0(scratch_dir, "fdr_fun.tif"),
+              overwrite=T)
+  st_write(outlet, paste0(scratch_dir,"outlet_fun.shp"), delete_layer=T)
   
+  #Delineate the watersheds
+  system(paste(paste(wbt_dir),
+               "-r=Watershed", 
+               paste0("--wd=",scratch_dir),
+               "--d8_pntr='fdr_fun.tif'", 
+               "--pour_pts='outlet_fun.shp'",
+               "-o='watershed.tif"))
   
-  
+  #load watershed shape into memory
+  sheds<-raster(paste0(scratch_dir,"watershed.tif"))
+  writeRaster(sheds,paste0(output_dir,output_name))
+
+  #export watershed grd (you have to reread b/c raster does not store data in memory)
+  sheds<-raster(paste0(output_dir,output_name))
+  sheds
 }
+
+#Estimate watersheds that are 1%,5%,and 10% the size of the original watershed
+#thresholds
+one<-cellStats(watershed, sum)*0.01*3.25^2
+five<-cellStats(watershed, sum)*0.05*3.25^2
+ten<-cellStats(watershed, sum)*0.10*3.25^2
+#delineation
+sheds_1pcnt <-threshold_fun(fac, fdr, one,  scratch_dir, output_dir, "test_01pct.tif")
+sheds_5pcnt <-threshold_fun(fac, fdr, five, scratch_dir, output_dir, "test_05pct.tif")
+sheds_10pcnt<-threshold_fun(fac, fdr, ten,  scratch_dir, output_dir, "test_10pct.tif")
